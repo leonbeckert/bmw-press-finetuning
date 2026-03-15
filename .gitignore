@@ -218,3 +218,12 @@ __marimo__/
 # Logs
 logs/
 data/
+
+# Training artifacts
+runs/
+mlruns/
+mlflow.db
+*.pt
+*.safetensors
+*.bin
+wandb/

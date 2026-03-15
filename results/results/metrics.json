@@ -1,0 +1,9 @@
+{
+  "eval_loss": 2.3472707271575928,
+  "eval_perplexity": 10.456990761674794,
+  "inference_tokens_per_sec": 82.42811097178213,
+  "train_peak_gpu_memory_allocated_mb": 8323.48193359375,
+  "train_peak_gpu_memory_reserved_mb": 11350.0,
+  "inference_peak_gpu_memory_allocated_mb": 3451.67919921875,
+  "inference_peak_gpu_memory_reserved_mb": 11376.0
+}
