@@ -2,7 +2,7 @@
 
 Fine-tune a small LLM on BMW PressClub press releases.
 
-Status: **data collection complete** — preprocessing next.
+Status: **data collection + preprocessing complete** — training next.
 
 ## Data Pipeline
 
@@ -59,6 +59,40 @@ Category tagging structure preserved separately in `article_categories.json`.
 - Early stop after 3 consecutive pages with no new articles
 - Full run: ~9 minutes, ~280 requests
 
+## Preprocessing
+
+Cleaning pipeline applied to all 1,429 articles before splitting:
+
+| Step | What | Why |
+|---|---|---|
+| Contact block removal | Cut from last contact marker onward | Template boilerplate identical across hundreds of articles — no domain signal |
+| URL/email/phone stripping | Conservative regex (only `https?://`, `www.`, `+\d` international format) | No semantic signal; conservative to avoid removing brand names like "Electrifying.com Awards" |
+| Newline normalization | All `\n` → space, collapse multiple spaces | Newlines in web-scraped HTML are rendering artifacts, not semantic structure |
+| Title prepending | `Title\nBody` format | Titles carry concentrated BMW vocabulary; single newline preserves semantic separation between title and body |
+
+No minimum-length filter post-cleaning — all 1,429 articles preserved.
+
+### Train/eval split
+
+90/10 random split with seed 42. Small corpus (1,429 articles) — maximize
+training data. 143 eval articles produce enough tokens for stable perplexity
+measurement. A chronological split (train on older, evaluate on newer) would
+better simulate real-world deployment and prevent temporal leakage, but risks
+systematic topic imbalance in the eval set if recent months are dominated by
+a single product launch.
+
+### Preprocessing statistics
+
+| Metric | Value |
+|---|---|
+| Articles cleaned | 1,429 |
+| Contact blocks removed | 351 (25%) |
+| Articles with URLs stripped | 267 |
+| Articles with emails stripped | 47 |
+| Articles with phones stripped | 47 |
+| Train set | 1,286 articles |
+| Eval set | 143 articles |
+
 ## Data Verification
 
 ### Manual checks
@@ -87,20 +121,29 @@ Category tagging structure preserved separately in `article_categories.json`.
 
 ```bash
 pip install -e .
-python scripts/scrape.py
+python scripts/scrape.py       # collect articles → data/raw/
+python scripts/preprocess.py   # clean + split → data/processed/
 ```
 
 ### Testing
 
 ```bash
 pytest tests/test_scrape.py              # unit tests — parsing, HTML cleaning
+pytest tests/test_preprocess.py          # unit tests — cleaning, splitting
 pytest tests/test_scrape_integration.py  # integration tests — corpus quality
 ruff check .                             # lint
 ```
 
-**Unit tests** (`test_scrape.py`): verify `clean_html` and `parse_feed_page` in
+**Scraper unit tests** (`test_scrape.py`): verify `clean_html` and `parse_feed_page` in
 isolation — table stripping, entity decoding, date filtering,
 short-article filtering, malformed XML handling.
+
+**Preprocessing unit tests** (`test_preprocess.py`): 38 tests covering each
+cleaning function in isolation — contact block cutting (including false
+positives like "Corporate Communications" in job titles), URL/email/phone
+stripping (preserving model numbers and fuel consumption data), whitespace
+normalization, title prepending, and train/eval split (determinism,
+no overlap, no data loss).
 
 **Integration tests** (`test_scrape_integration.py`): run against the actual
 scraped corpus. 12 articles sampled across the full length spectrum
@@ -130,9 +173,15 @@ dates after 2023 cutoff, corpus and category index in sync.
 }
 ```
 
+**`data/processed/train.jsonl`** / **`eval.jsonl`** — cleaned articles, one per line:
+```json
+{"article_id": "T0407238EN", "text": "BMW announces a completely new Head-up Display...\nFull cleaned article text..."}
+```
+
+**`data/processed/stats.json`** — corpus statistics before/after cleaning.
+
 ## What's next
 
-- [ ] Preprocessing: train/eval split, tokenization
 - [ ] Model selection + training config
 - [ ] Training + evaluation metrics
 - [ ] Results + model comparison
