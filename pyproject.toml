@@ -15,7 +15,7 @@ dev = [
 ]
 train = [
     "torch>=2.8",
-    "torchvision>=0.23",
+    "torchvision>=0.23",  # required by mlflow.transformers.log_model()
     "transformers>=4.57,<5.0",
     "trl>=0.28",
     "datasets>=3.5,<4",

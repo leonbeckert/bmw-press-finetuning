@@ -1,8 +1,8 @@
 # BMW Press Release Fine-Tuning
 
-Fine-tune a small LLM on BMW PressClub press releases.
-
-Status: **data collection + preprocessing complete** — training next.
+Fine-tune a small LLM on BMW PressClub press releases. Config-driven
+pipeline with MLflow experiment tracking, automated evaluation metrics,
+and side-by-side sample generations.
 
 ## Data Pipeline
 
@@ -117,12 +117,149 @@ a single product launch.
 | Text length (max) | 37,727 chars |
 | Total corpus size | 8.5M chars (~2.1M tokens) |
 
+## Training
+
+### Model selection
+
+Qwen3-0.6B-Base — 596M parameters, 28 transformer layers, 896 hidden
+dimensions. Released May 2025, current-generation architecture. Base model
+(not instruct) because the task is domain adaptation via continued
+pretraining, not instruction-following.
+
+Full fine-tuning, not LoRA. At 0.6B parameters with bf16 precision, the
+full model + optimizer states fit comfortably on a single RTX 4090 (24 GB).
+LoRA would add adapter complexity without a VRAM-driven reason.
+
+### Training method
+
+SFTTrainer from `trl` with `packing=True`. Packing concatenates multiple
+short articles into single 1024-token sequences, eliminating padding waste.
+With a median article length of ~1,200 tokens and many articles well below
+that, packing significantly improves GPU utilization compared to padding
+each article individually.
+
+All hyperparameters live in `configs/base.yaml`, with the option to pass a
+custom config via CLI argument (`python scripts/train.py configs/custom.yaml`).
+Config-driven pipeline: change a YAML value, get a different experiment.
+
+### Training configuration
+
+| Parameter | Value | Rationale |
+|---|---|---|
+| `per_device_train_batch_size` | 2 | Started at 4, hit OOM on backward pass — activation memory at seq_length=1024 with packing exceeded estimates |
+| `gradient_accumulation_steps` | 8 | Maintains effective batch size of 16 (2 × 8) after reducing micro-batch size |
+| `gradient_checkpointing` | false | Initially enabled after the OOM at batch_size=4. After reducing to batch_size=2, the model fits in 12.6 GB — well within the 24 GB budget. Disabling checkpointing recovered 13% training speed (6:06 vs 7:00 min) at the cost of ~4 GB more VRAM |
+| `learning_rate` | 2e-4 | Standard for small-model full fine-tuning with AdamW |
+| `lr_scheduler_type` | cosine | Gradual decay avoids abrupt learning rate drops |
+| `warmup_ratio` | 0.05 | 5% of steps — stabilizes Adam moment estimates at the start |
+| `max_seq_length` | 1024 | Covers the majority of articles; longer ones get truncated at training time |
+| `num_train_epochs` | 3 | Small corpus — multiple passes needed for convergence |
+| `eval_steps` | 25 | Refined from 50 after observing overfitting between evaluation points — finer granularity captured a better checkpoint |
+| `bf16` | true | Native RTX 4090 precision, halves memory vs fp32 |
+
+### Experiment tracking
+
+MLflow tracks all training runs. The HuggingFace `MLflowCallback` handles
+the run lifecycle and logs training metrics (loss, learning rate, gradient
+norm, eval_loss) automatically. Post-training, the script reopens the same
+MLflow run to log custom metrics (perplexity, inference throughput, GPU
+memory), sample generations as a browsable table, the model artifact, and
+the full config YAML.
+
+`mlflow.enable_system_metrics_logging()` provides continuous GPU utilization,
+memory, and power consumption charts throughout training — no custom
+instrumentation needed.
+
+### Overfitting and checkpoint selection
+
+Eval loss drops steadily through epoch 1, continues improving into epoch 2,
+then begins rising — classic overfitting on a small corpus. The config uses
+`load_best_model_at_end: true` with `metric_for_best_model: eval_loss`,
+so the trainer automatically loads the checkpoint with lowest eval loss
+rather than the final (overfitting) weights.
+
+Refining `eval_steps` from 50 to 25 captured a better checkpoint at the
+minimum of the loss curve, improving perplexity from 10.46 to 9.96.
+
+### VRAM utilization
+
+Training peaked at 12.6 GB allocated out of 24 GB available. The progression:
+batch_size=4 caused OOM on the backward pass, so micro-batch was reduced to 2.
+With batch_size=2, gradient checkpointing brought memory down to 8.3 GB but
+added ~30% compute overhead. Since 12.6 GB still leaves 11 GB headroom on a
+24 GB card, gradient checkpointing was disabled — recovering 13% training
+speed (6:06 vs 7:00 min) while staying well within the VRAM budget.
+
+## Results
+
+### Metrics
+
+| Metric | Value |
+|---|---|
+| Base model eval loss | 3.04 |
+| Base model perplexity | 20.85 |
+| Fine-tuned eval loss | 2.30 |
+| Fine-tuned perplexity | 9.96 |
+| Perplexity reduction | 2.1× |
+| Training time | 6:06 min (RTX 4090) |
+| Inference throughput | 84.0 tokens/sec |
+| Train peak GPU memory (allocated) | 12,566 MB |
+| Train peak GPU memory (reserved) | 14,454 MB |
+| Inference peak GPU memory (allocated) | 3,452 MB |
+
+### Sample generations (base model → fine-tuned)
+
+Six prompts tested before and after fine-tuning. The base model produces
+generic, often nonsensical text (math problems, stock market calculations,
+repetitive filler). The fine-tuned model generates BMW press release style
+prose with correct product names, plant locations, technical specifications,
+and corporate communication patterns.
+
+Example — prompt: *"BMW Group reported in 2025 that"*
+
+**Base model:** Generates a stock valuation exercise ("the company's share
+price has grown by 22%... What is the current market value?") — completely
+off-domain.
+
+**Fine-tuned:** "BMW Group reported in 2025 that the company's global sales
+in the Automotive Segment were down 1.4% on the previous year, despite the
+continued strength of its brands and a strong product mix." — adopts BMW's
+reporting style, quotes a board member by name and title, uses the
+company's characteristic structure of headline → location → body → quote.
+
+The fine-tuned model convincingly adopts BMW's writing style but hallucinates
+factual details — invented sales figures, conflated model specifications,
+fictional board member quotes. This is expected: the model learned the
+*form* of BMW press releases (structure, vocabulary, tone) but has no
+mechanism to verify facts. Domain adaptation shifts style, not knowledge.
+
+Full side-by-side comparison in `results/sample_generations.json`.
+
+## What I would investigate next
+
+- **Flash Attention 2** — eliminates cross-attention contamination between
+  packed articles (tokens currently attend across article boundaries without
+  it) and improves training throughput
+- **Model serving** — evaluate MLflow's built-in serving (`mlflow models
+  serve`) against a dedicated vLLM endpoint for throughput-critical workloads
+- **Chronological train/eval split** — better simulates real-world
+  deployment (train on past, evaluate on future), at the cost of potential
+  topic imbalance in the eval set
+
 ## Usage
+
+**Requirements:** Python ≥ 3.10, CUDA-capable GPU with ≥ 16 GB VRAM
+(trained on RTX 4090, CUDA 12.4). Scraping and preprocessing run on CPU.
 
 ```bash
 pip install -e .
 python scripts/scrape.py       # collect articles → data/raw/
 python scripts/preprocess.py   # clean + split → data/processed/
+
+pip install -e ".[train]"      # install training dependencies (transformers, trl, mlflow, etc.)
+python scripts/train.py configs/base.yaml   # train on GPU → results/
+
+mlflow ui                      # browse experiment runs → http://127.0.0.1:5000
 ```
 
 ### Testing
@@ -130,6 +267,7 @@ python scripts/preprocess.py   # clean + split → data/processed/
 ```bash
 pytest tests/test_scrape.py              # unit tests — parsing, HTML cleaning
 pytest tests/test_preprocess.py          # unit tests — cleaning, splitting
+pytest tests/test_train.py               # unit tests — config, dataset format
 pytest tests/test_scrape_integration.py  # integration tests — corpus quality
 ruff check .                             # lint
 ```
@@ -144,6 +282,10 @@ positives like "Corporate Communications" in job titles), URL/email/phone
 stripping (preserving model numbers and fuel consumption data), whitespace
 normalization, title prepending, and train/eval split (determinism,
 no overlap, no data loss).
+
+**Training unit tests** (`test_train.py`): config loading and validation
+(required keys, types, data paths), dataset format checks (text field
+presence, train/eval no overlap), flatten_dict utility.
 
 **Integration tests** (`test_scrape_integration.py`): run against the actual
 scraped corpus. 12 articles sampled across the full length spectrum
@@ -180,8 +322,7 @@ dates after 2023 cutoff, corpus and category index in sync.
 
 **`data/processed/stats.json`** — corpus statistics before/after cleaning.
 
-## What's next
+**`results/metrics.json`** — evaluation metrics from the training run.
 
-- [ ] Model selection + training config
-- [ ] Training + evaluation metrics
-- [ ] Results + model comparison
+**`results/sample_generations.json`** — base model vs. fine-tuned generations
+for six BMW-domain prompts.

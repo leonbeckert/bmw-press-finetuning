@@ -224,7 +224,8 @@ def main():
         mlflow.log_metric("eval_perplexity", perplexity)
         print(f"Base model — eval loss: {base_eval_loss:.4f} | perplexity: {base_perplexity:.2f}")
         print(f"Fine-tuned — eval loss: {eval_loss:.4f} | perplexity: {perplexity:.2f}")
-        print(f"Perplexity reduction: {base_perplexity:.2f} → {perplexity:.2f} ({base_perplexity / perplexity:.1f}x)")
+        ratio = base_perplexity / perplexity
+        print(f"Perplexity reduction: {base_perplexity:.2f} → {perplexity:.2f} ({ratio:.1f}x)")
 
         # Inference latency
         print("Measuring inference latency...")
