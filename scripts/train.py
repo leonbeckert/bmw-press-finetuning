@@ -180,6 +180,13 @@ def main():
         args=sft_config,
     )
 
+    # Base model perplexity (before fine-tuning)
+    print("Evaluating base model perplexity...")
+    base_eval_results = trainer.evaluate()
+    base_eval_loss = base_eval_results["eval_loss"]
+    base_perplexity = math.exp(base_eval_loss)
+    print(f"Base model — eval loss: {base_eval_loss:.4f} | perplexity: {base_perplexity:.2f}")
+
     # Train
     print("Starting training...")
     torch.cuda.reset_peak_memory_stats()
@@ -207,12 +214,17 @@ def main():
         mlflow.log_params(flatten_dict(config))
         mlflow.log_dict(config, "config.yaml")
 
-        # Perplexity
+        # Perplexity (base + fine-tuned)
+        mlflow.log_metric("base_eval_loss", base_eval_loss)
+        mlflow.log_metric("base_perplexity", base_perplexity)
+
         eval_results = trainer.evaluate()
         eval_loss = eval_results["eval_loss"]
         perplexity = math.exp(eval_loss)
         mlflow.log_metric("eval_perplexity", perplexity)
-        print(f"Eval loss: {eval_loss:.4f} | Perplexity: {perplexity:.2f}")
+        print(f"Base model — eval loss: {base_eval_loss:.4f} | perplexity: {base_perplexity:.2f}")
+        print(f"Fine-tuned — eval loss: {eval_loss:.4f} | perplexity: {perplexity:.2f}")
+        print(f"Perplexity reduction: {base_perplexity:.2f} → {perplexity:.2f} ({base_perplexity / perplexity:.1f}x)")
 
         # Inference latency
         print("Measuring inference latency...")
@@ -262,10 +274,13 @@ def main():
     # ------------------------------------------------------------------
     # Write results to disk (for git)
     # ------------------------------------------------------------------
-    results_dir = Path("results")
+    repo_root = Path(__file__).resolve().parent.parent
+    results_dir = repo_root / "results"
     results_dir.mkdir(exist_ok=True)
 
     metrics = {
+        "base_eval_loss": base_eval_loss,
+        "base_perplexity": base_perplexity,
         "eval_loss": eval_loss,
         "eval_perplexity": perplexity,
         "inference_tokens_per_sec": avg_throughput,
